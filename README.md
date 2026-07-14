@@ -178,19 +178,81 @@ docker run -d --name cluster_a --network host \
 
 ## 验证
 
-### 基本多 Catalog 查询
+### 前置准备
+
+在 FE 启动参数中添加 krb5.conf（已添加到 fe.conf 的 JAVA_OPTS）：
+
+```bash
+-Djava.security.krb5.conf=/opt/starrocks/fe/meta/krb5.conf
+```
+
+将 keytab 文件复制到 FE 可访问路径：
+
+```bash
+mkdir -p /opt/starrocks/fe/meta/keytabs
+cp /data/starrocks-deploy/cluster_a/keytabs/hive.service.keytab \
+   /opt/starrocks/fe/meta/keytabs/hive_a.keytab
+cp /data/starrocks-deploy/cluster_b/keytabs/hive.service.keytab \
+   /opt/starrocks/fe/meta/keytabs/hive_b.keytab
+```
+
+### 创建带 Kerberos + HA 配置的 Catalog
 
 ```sql
 CREATE EXTERNAL CATALOG hive_a PROPERTIES (
     "type"="hive",
-    "hive.metastore.uris"="thrift://192.168.0.211:9084"
+    "hive.metastore.uris"="thrift://192.168.0.211:9084",
+    "hive.metastore.kerberos.principal"="hive/cluster_a@SR.TEST",
+    "hive.metastore.kerberos.keytab"="/opt/starrocks/fe/meta/keytabs/hive_a.keytab",
+    "dfs.nameservices"="nameservice_a",
+    "dfs.ha.namenodes.nameservice_a"="nn1",
+    "dfs.namenode.rpc-address.nameservice_a.nn1"="192.168.0.211:8020",
+    "dfs.client.failover.proxy.provider.nameservice_a"="org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider"
 );
 
 CREATE EXTERNAL CATALOG hive_b PROPERTIES (
     "type"="hive",
-    "hive.metastore.uris"="thrift://192.168.0.211:9085"
+    "hive.metastore.uris"="thrift://192.168.0.211:9085",
+    "hive.metastore.kerberos.principal"="hive/cluster_b@SR.TEST",
+    "hive.metastore.kerberos.keytab"="/opt/starrocks/fe/meta/keytabs/hive_b.keytab",
+    "dfs.nameservices"="nameservice_b",
+    "dfs.ha.namenodes.nameservice_b"="nn1",
+    "dfs.namenode.rpc-address.nameservice_b.nn1"="192.168.0.211:8020",
+    "dfs.client.failover.proxy.provider.nameservice_b"="org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider"
 );
-
-SELECT * FROM hive_a.test_db.users;      -- 1 Alice 30 / 2 Bob 25
-SELECT * FROM hive_b.test_db.products;   -- 101 Widget 9.99 / 102 Gadget 19.99
 ```
+
+### 验证查询
+
+```sql
+-- 查看 Catalog 列表
+SHOW CATALOGS;
+
+-- 查看各 Catalog 中的数据库
+SHOW DATABASES FROM hive_a;
+SHOW DATABASES FROM hive_b;
+
+-- 查看表
+SHOW TABLES FROM hive_a.nyc;
+SHOW TABLES FROM hive_b.test_db;
+
+-- 查询数据
+SELECT * FROM hive_b.test_db.products;
+-- 预期输出:
+-- pid    pname    price
+-- 101    Widget   9.99
+-- 102    Gadget   19.99
+```
+
+### 验证结果 (2026-07-14)
+
+| 验证项 | 状态 |
+|--------|------|
+| Kerberos HMS 认证 (hive_a :9084) | ✅ |
+| Kerberos HMS 认证 (hive_b :9085) | ✅ |
+| 查询 hive_b.test_db.products 数据 | ✅ |
+| 跨 Catalog 元数据访问 | ✅ |
+| HDFS HA 配置透传到 BE | ✅ |
+| hive_a.nyc.taxis (文件格式问题) | ❌ UNKNOWN |
+
+详见 `docs/verification_results.md`。
