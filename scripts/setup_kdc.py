@@ -1,0 +1,26 @@
+import subprocess, os
+
+# Write kdc.conf
+kdc_conf = """[kdcdefaults]
+ kdc_ports = 88
+ kdc_tcp_ports = 88
+
+[realms]
+ SR.TEST = {
+  master_key_type = aes256-cts
+  acl_file = /var/kerberos/krb5kdc/kadm5.acl
+  dict_file = /usr/share/dict/words
+  admin_keytab = /var/kerberos/krb5kdc/kadm5.keytab
+  max_renewable_life = 7d
+  supported_enctypes = aes256-cts:normal aes128-cts:normal des3-hmac-sha1:normal arcfour-hmac:normal
+ }
+"""
+
+with open('/var/kerberos/krb5kdc/kdc.conf', 'w') as f:
+    f.write(kdc_conf)
+
+# Write kadm5.acl
+with open('/var/kerberos/krb5kdc/kadm5.acl', 'w') as f:
+    f.write('*/admin@SR.TEST *\n')
+
+print('Config files written')
