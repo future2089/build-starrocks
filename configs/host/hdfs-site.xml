@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<configuration>
+  <property>
+    <name>dfs.replication</name>
+    <value>1</value>
+  </property>
+  <property>
+    <name>dfs.namenode.name.dir</name>
+    <value>/data/bigdata/datadir/hdfs/name</value>
+    <final>true</final>
+  </property>
+  <property>
+    <name>dfs.datanode.data.dir</name>
+    <value>/data/bigdata/datadir/hdfs/data</value>
+    <final>true</final>
+  </property>
+  <property>
+    <name>dfs.http.address</name>
+    <value>0.0.0.0:50070</value>
+  </property>
+  <property>
+    <name>dfs.permissions</name>
+    <value>false</value>
+  </property>
+
+  <!-- Kerberos Authentication -->
+  <property>
+    <name>dfs.namenode.keytab.file</name>
+    <value>/data/bigdata/hadoop-3.3.6/etc/hadoop/hdfs.nn.keytab</value>
+  </property>
+  <property>
+    <name>dfs.namenode.kerberos.principal</name>
+    <value>hdfs/cluster_a@SR.TEST</value>
+  </property>
+  <property>
+    <name>dfs.secondary.namenode.keytab.file</name>
+    <value>/data/bigdata/hadoop-3.3.6/etc/hadoop/hdfs.nn.keytab</value>
+  </property>
+  <property>
+    <name>dfs.secondary.namenode.kerberos.principal</name>
+    <value>hdfs/cluster_a@SR.TEST</value>
+  </property>
+  <property>
+    <name>dfs.datanode.keytab.file</name>
+    <value>/data/bigdata/hadoop-3.3.6/etc/hadoop/hdfs.nn.keytab</value>
+  </property>
+  <property>
+    <name>dfs.datanode.kerberos.principal</name>
+    <value>hdfs/cluster_a@SR.TEST</value>
+  </property>
+
+  <!-- Data Transfer Security -->
+  <property>
+    <name>dfs.data.transfer.protection</name>
+    <value>authentication</value>
+  </property>
+  <property>
+    <name>dfs.encrypt.data.transfer</name>
+    <value>false</value>
+  </property>
+  <property>
+    <name>dfs.block.access.token.enable</name>
+    <value>true</value>
+  </property>
+
+  <!-- DataNode hostname (required when OS hostname is localhost) -->
+  <property>
+    <name>dfs.datanode.hostname</name>
+    <value>192.168.0.211</value>
+  </property>
+
+  <property>
+    <name>ignore.secure.ports.for.testing</name>
+    <value>true</value>
+  </property>
+</configuration>

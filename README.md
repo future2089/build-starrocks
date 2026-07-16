@@ -176,6 +176,28 @@ docker run -d --name cluster_a --network host \
 
 **解决方案:** 从 `starrocks-fe.jar` 提取更新后的 `HadoopExt.class` 和 `GenericExceptionAction.class` 覆盖到 `starrocks-hadoop-ext.jar`。
 
+#### Q: `SIMPLE authentication is not enabled. Available:[TOKEN, KERBEROS]`
+
+**原因:** HDFS NameNode 配置了 `hadoop.security.authentication=kerberos`，但 BE 未配置 Kerberos 凭据。
+
+**解决方案:**
+1. 在 BE 容器中配置 `/etc/krb5.conf`（`default_realm=SR.TEST`，指向 KDC）
+2. 拷贝 keytab（如 `hdfs/cluster_a@SR.TEST`）到 BE 容器（如 `/etc/be.keytab`）
+3. 更新 BE 的 `core-site.xml`/`hdfs-site.xml`（从 host 拷贝 Kerberos 配置）
+4. 在 BE 启动脚本 `start_be.sh` 中加入 `kinit -kt /etc/be.keytab hdfs/cluster_a@SR.TEST`
+5. 在 supervisor 的 `[program:beservice]` 中添加 `environment=KRB5CCNAME=FILE:/tmp/krb5cc_be`
+
+参考 `scripts/start_be.sh` 和 `configs/be/`。
+
+#### Q: `Could not obtain block: ... No live nodes contain current block`
+
+**原因:** HDFS DataNode 因 OS hostname 为 `localhost` 而向 NameNode 注册为 `127.0.0.1:9866`，BE 容器内无法访问。
+
+**解决方案:**
+1. 修改 OS hostname（如 `node211`）并添加 `/etc/hosts` 条目
+2. 在 `hdfs-site.xml` 中设置 `dfs.datanode.hostname=192.168.0.211`
+3. 重启 DataNode 使其重新注册
+
 ## 验证
 
 ### 前置准备
@@ -244,15 +266,46 @@ SELECT * FROM hive_b.test_db.products;
 -- 102    Gadget   19.99
 ```
 
-### 验证结果 (2026-07-14)
+### BE Kerberos 配置
 
-| 验证项 | 状态 |
-|--------|------|
-| Kerberos HMS 认证 (hive_a :9084) | ✅ |
-| Kerberos HMS 认证 (hive_b :9085) | ✅ |
-| 查询 hive_b.test_db.products 数据 | ✅ |
-| 跨 Catalog 元数据访问 | ✅ |
-| HDFS HA 配置透传到 BE | ✅ |
-| hive_a.nyc.taxis (文件格式问题) | ❌ UNKNOWN |
+1. 将 `krb5.conf` 复制到 BE 容器的 `/etc/krb5.conf`
+2. 拷贝 keytab：`docker cp hdfs.nn.keytab sr-quickstart:/etc/be.keytab`
+3. 启动前执行 `kinit`：
+
+```bash
+docker exec sr-quickstart kinit -kt /etc/be.keytab hdfs/cluster_a@SR.TEST
+```
+
+4. 验证 ticket：
+
+```bash
+docker exec sr-quickstart klist
+# Ticket cache: FILE:/tmp/krb5cc_be
+# Default principal: hdfs/cluster_a@SR.TEST
+```
+
+5. 覆盖 BE 的 Hadoop 配置：
+
+```bash
+cat core-site.xml | docker exec -i sr-quickstart tee /data/deploy/starrocks/be/conf/core-site.xml
+cat hdfs-site.xml | docker exec -i sr-quickstart tee /data/deploy/starrocks/be/conf/hdfs-site.xml
+```
+
+6. 在 supervisor 配置中添加 `environment=KRB5CCNAME=FILE:/tmp/krb5cc_be`
+7. 用 `scripts/start_be.sh` 替换 `$STARROCKS_HOME/be/bin/start_be.sh`
+
+### 验证结果 (2026-07-16)
+
+| 验证项 | 状态 | 备注 |
+|--------|------|------|
+| Kerberos HMS 认证 (hive_a :9084) | ✅ | FE → HMS SASL |
+| Kerberos HMS 认证 (hive_b :9085) | ✅ | FE → HMS SASL |
+| HDFS Kerberos 认证 (NameNode) | ✅ | BE → NN Kerberos RPC |
+| HDFS Kerberos 认证 (DataNode) | ✅ | BE → DN 块读取 |
+| 查询 hive_a.test_db.users | ✅ | `1 Alice 30`, `2 Bob 25` |
+| 查询 hive_b.test_db.products | ✅ | `101 Widget 9.99`, `102 Gadget 19.99` |
+| 跨 Catalog 元数据访问 | ✅ | 两个 HMS 集群同时访问 |
+| HDFS HA 配置透传到 BE | ✅ | Catalog 级别 `dfs.*` 配置 |
+| BE 自动重启 (supervisor) | ✅ | 含 kinit 自动获取 Kerberos ticket |
 
 详见 `docs/verification_results.md`。

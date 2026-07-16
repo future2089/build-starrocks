@@ -35,6 +35,7 @@ StarRocks FE
   └── BE
         receives dfs.*/hadoop.* properties via Thrift
         creates HDFS FileSystem with per-catalog config
+        uses Kerberos ticket (kinit + KRB5CCNAME) for HDFS auth
 ```
 
 ### 修改点
@@ -44,7 +45,9 @@ StarRocks FE
 | `HDFSCloudCredential.java` | `applyToConfiguration()` — 注入 hadoopConfiguration 到 Hadoop Configuration |
 | | `toThrift()` — 将 HA/Kerberos 配置传递给 BE |
 | `HadoopExt.java` | 新增 `doAsWithSwap(principal, keytab, action)` — per-catalog Kerberos UGI 切换 |
+| | 添加 `UserGroupInformation.setConfiguration()` — 确保 Kerberos 模式 |
 | `HiveMetaClient.java` | 新增 `krbPrincipal`/`krbKeytab` 字段；`callRPC()` 使用 `doAsWithSwap()` |
+| | `getClient()` 中 RecyclableClient 创建包装在 doAsWithSwap action 内 |
 
 ### 部署拓扑
 
@@ -64,7 +67,7 @@ StarRocks FE
 │                    ┌────────▼────────┐                    │
 │                    │     HDFS        │                    │
 │                    │  NN :8020       │                    │
-│                    │  (SIMPLE auth)  │                    │
+│                    │  (KERBEROS)     │                    │
 │                    └─────────────────┘                    │
 └──────────────────────────────────────────────────────────┘
 ```
