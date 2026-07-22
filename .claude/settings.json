@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ssh root@192.168.0.181 \"docker inspect starrocks/dev-env-centos7:3.3.17 --format '{{.Architecture}} {{.Os}}'\")",
+      "Bash(ssh-copy-id -o StrictHostKeyChecking=no root@192.168.0.181)",
+      "Bash(ssh -o StrictHostKeyChecking=no -o BatchMode=yes root@192.168.0.181 \"echo 'SSH OK: ' && uname -m\")",
+      "Bash(ssh -v -o StrictHostKeyChecking=no -o BatchMode=yes root@192.168.0.181 \"echo ok\")"
+    ]
+  }
+}
