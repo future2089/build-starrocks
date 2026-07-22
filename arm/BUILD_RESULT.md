@@ -26,14 +26,17 @@
 
 ## 应用的补丁
 
+### FE 修改汇总
+
+| 文件 | 修改内容 | 用途 |
+|------|----------|------|
+| `HDFSCloudCredential.java` | toThrift() 转发 Kerberos 配置到 BE | per-catalog 认证传递 |
+| `HadoopExt.java` | doAsWithSwap() per-catalog UGI 切换 + per-catalog krb5.conf 动态替换 | 隔离不同域/KDC 的 Kerberos 上下文 |
+| `HiveMetaClient.java` | `createHiveMetaClient()` 中登录 principal 优先读 `hive.metastore.client.kerberos.principal`，未设置时回退到 `hive.metastore.kerberos.principal` | 修复 client principal 与服务 principal 混用导致的 keytab 登录失败 |
+
 ### BE 修改
 - `be/src/fs/fs.h` — FSOptions 增加 `std::string catalog_id`
 - `be/src/fs/hdfs/hdfs_fs_cache.cpp` — per-catalog Kerberos keytab/principal 注入，独立 KRB5CCNAME
-
-### FE 修改
-- `HDFSCloudCredential.java` — toThrift() 转发 Kerberos 配置到 BE
-- `HadoopExt.java` — doAsWithSwap() per-catalog UGI 切换，修复 12 个 checkstyle 违规
-- `HiveMetaClient.java` — RecyclableClient 创建在 doAsWithSwap action 内
 
 ### build.sh 修改
 - 跳过 `.debuginfo` 独立文件生成，仅执行 `strip --strip-debug`（Release 编译，不输出多余文件）
@@ -45,6 +48,28 @@
 - 源码目录: `/Bigdata1/starrocks-src/`（容器内: `/data/starrocks-src/`）
 - 编译脚本: `/Bigdata1/build-starrocks/build_arm.sh`（本地）→ 需 scp 到远程执行
 - 补丁目录: `/Bigdata1/build-starrocks/patches/`
+
+## 部署环境 (sr-deploy)
+
+| 组件 | 位置 | 说明 |
+|------|------|------|
+| sr-deploy 容器 | `192.168.0.211` | StarRocks FE + BE + Broker + Director |
+| FE 安装路径 | `/opt/starrocks/fe/` | 绑挂 `/data/starrocks-build/starrocks-3.3.17/output/fe/` |
+| FE Java 参数 | `-Djava.security.krb5.conf=/opt/starrocks/fe/meta/krb5.conf` | 全局 Kerberos 配置（含 SR.TEST + ARM.SR.TEST 双域） |
+| ARM 集群 KDC | `192.168.0.181:88` | `ARM.SR.TEST` 域，鲲鹏 920 节点原生 KDC |
+| ARM HDFS | `192.168.0.181:8020` | Hadoop 3.3.6（HDP 管理），NN + DN |
+| ARM HMS | `192.168.0.181:9083` | Apache Hive 3.1.3，MySQL 元数据库，**无 Kerberos** |
+| hadoop-arm 容器 | 192.168.0.181 内 | 额外 HMS + Derby 数据库（已失活） |
+
+### 已验证能力
+- ✅ Per-catalog `hive.metastore.kerberos.krb5.conf` — FE 动态切换 krb5 配置，连接 ARM.SR.TEST 域 KDC
+- ✅ Per-catalog UGI 隔离 — `HadoopExt.doAsWithSwap()` 登录独立 principal 并切换 KRB5CCNAME
+- ✅ FE Kerberos SASL 握手 — `starrocks/arm-query@ARM.SR.TEST` 登录 + 获取 `hive/arm-hive@ARM.SR.TEST` 服务票据，GSS 上下文建立成功
+- ✅ 跨域 krb5.conf — `[domain_realm]` 映射 `arm-hive`、`192.168.0.181` 到 `ARM.SR.TEST`
+
+### 遗留问题
+- ⚠️ ARM HMS（PID 860699）未启用 Kerberos（`hive.metastore.sasl.enabled` 未设置），FE 尝试 SASL 连接时 HMS 无对应处理，导致 `Kerberos login failed: Unable to instantiate HiveMetaStoreClient`
+- ⚠️ 修复方向：HMS 侧启用 SASL + 配置 `hive.metastore.kerberos.principal` 和 keytab，或 catalog 侧关闭 SASL 使用 SIMPLE 协议
 
 ## 编译方式
 
