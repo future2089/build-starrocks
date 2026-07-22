@@ -1,0 +1,117 @@
+import os
+
+base = '/data/starrocks-deploy'
+
+def write_file(path, content):
+    with open(path, 'w') as f:
+        f.write(content)
+
+# Cluster A hive-site.xml with Kerberos
+write_file(f'{base}/cluster_a/conf/hive-site.xml', """<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+  <property>
+    <name>javax.jdo.option.ConnectionURL</name>
+    <value>jdbc:mysql://192.168.0.211:3306/hive_a?createDatabaseIfNotExist=true&amp;useSSL=false</value>
+  </property>
+  <property>
+    <name>javax.jdo.option.ConnectionDriverName</name>
+    <value>com.mysql.jdbc.Driver</value>
+  </property>
+  <property>
+    <name>javax.jdo.option.ConnectionUserName</name>
+    <value>root</value>
+  </property>
+  <property>
+    <name>javax.jdo.option.ConnectionPassword</name>
+    <value>thinker</value>
+  </property>
+  <property>
+    <name>hive.metastore.schema.verification</name>
+    <value>false</value>
+  </property>
+  <property>
+    <name>hive.metastore.event.db.notification.api.auth</name>
+    <value>false</value>
+  </property>
+  <property>
+    <name>hive.metastore.warehouse.dir</name>
+    <value>/user/hive_a/warehouse</value>
+  </property>
+  <property>
+    <name>hive.metastore.uris</name>
+    <value>thrift://192.168.0.211:9084</value>
+  </property>
+  <property>
+    <name>hive.metastore.sasl.enabled</name>
+    <value>true</value>
+  </property>
+  <property>
+    <name>hive.metastore.kerberos.keytab.file</name>
+    <value>/data/deploy/keytabs/hive.service.keytab</value>
+  </property>
+  <property>
+    <name>hive.metastore.kerberos.principal</name>
+    <value>hive/localhost@SR.TEST</value>
+  </property>
+  <property>
+    <name>hive.metastore.client.kerberos.principal</name>
+    <value>hive/localhost@SR.TEST</value>
+  </property>
+</configuration>
+""")
+
+# Cluster B hive-site.xml with Kerberos  
+write_file(f'{base}/cluster_b/conf/hive-site.xml', """<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+  <property>
+    <name>javax.jdo.option.ConnectionURL</name>
+    <value>jdbc:mysql://192.168.0.211:3306/hive_b?createDatabaseIfNotExist=true&amp;useSSL=false</value>
+  </property>
+  <property>
+    <name>javax.jdo.option.ConnectionDriverName</name>
+    <value>com.mysql.jdbc.Driver</value>
+  </property>
+  <property>
+    <name>javax.jdo.option.ConnectionUserName</name>
+    <value>root</value>
+  </property>
+  <property>
+    <name>javax.jdo.option.ConnectionPassword</name>
+    <value>thinker</value>
+  </property>
+  <property>
+    <name>hive.metastore.schema.verification</name>
+    <value>false</value>
+  </property>
+  <property>
+    <name>hive.metastore.event.db.notification.api.auth</name>
+    <value>false</value>
+  </property>
+  <property>
+    <name>hive.metastore.warehouse.dir</name>
+    <value>/user/hive_b/warehouse</value>
+  </property>
+  <property>
+    <name>hive.metastore.uris</name>
+    <value>thrift://192.168.0.211:9085</value>
+  </property>
+  <property>
+    <name>hive.metastore.sasl.enabled</name>
+    <value>true</value>
+  </property>
+  <property>
+    <name>hive.metastore.kerberos.keytab.file</name>
+    <value>/data/deploy/keytabs/hive.service.keytab</value>
+  </property>
+  <property>
+    <name>hive.metastore.kerberos.principal</name>
+    <value>hive/localhost@SR.TEST</value>
+  </property>
+  <property>
+    <name>hive.metastore.client.kerberos.principal</name>
+    <value>hive/localhost@SR.TEST</value>
+  </property>
+</configuration>
+""")
+
+print('Done')

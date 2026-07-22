@@ -1,16 +1,4 @@
-# Temp debug scripts (root level)
-*.py
-!scripts/*.py
-!patches/apply_patches.sh
-
-# IDE
-.vs/
-.vscode/
-*.swp
-*.swo
-
-# OS
-*.pyc
-__pycache__/
-.DS_Store
-Thumbs.db
+# Build outputs - binary and jar files
+*.jar
+*.debuginfo
+starrocks_be
