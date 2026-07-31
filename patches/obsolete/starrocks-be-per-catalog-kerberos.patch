@@ -1,0 +1,423 @@
+diff --git a/be/src/fs/fs.h b/be/src/fs/fs.h
+index 211823a..bfb7b43 100644
+--- a/be/src/fs/fs.h
++++ b/be/src/fs/fs.h
+@@ -81,6 +81,7 @@ public:
+     const TUploadReq* upload;
+     const TDownloadReq* download;
+     const TCloudConfiguration* cloud_configuration;
++    std::string catalog_id;
+ };
+ 
+ struct SequentialFileOptions {
+diff --git a/be/src/fs/hdfs/hdfs_fs_cache.cpp b/be/src/fs/hdfs/hdfs_fs_cache.cpp
+index 06ea56f..d59dcbd 100644
+--- a/be/src/fs/hdfs/hdfs_fs_cache.cpp
++++ b/be/src/fs/hdfs/hdfs_fs_cache.cpp
+@@ -72,17 +72,64 @@ static Status create_hdfs_fs_handle(const std::string& namenode, const std::shar
+                               hedged_read_threshold_millis.data());
+     }
+ 
++    // Per-catalog Kerberos authentication support.
++    // If the catalog specifies hadoop.security.authentication=kerberos with
++    // keytab and principal, set up per-connection credential cache so that
++    // different catalogs can use different Kerberos identities for HDFS access.
++    bool use_kerberos = false;
++    std::string krb_keytab, krb_principal;
++    if (!cloud_properties.empty()) {
++        auto auth_it = cloud_properties.find("hadoop.security.authentication");
++        if (auth_it != cloud_properties.end() && auth_it->second == "kerberos") {
++            auto kt_it = cloud_properties.find("hadoop.security.keytab.file");
++            auto pr_it = cloud_properties.find("hadoop.security.krb5.principal");
++            if (kt_it != cloud_properties.end() && !kt_it->second.empty() &&
++                pr_it != cloud_properties.end() && !pr_it->second.empty()) {
++                use_kerberos = true;
++                krb_keytab = kt_it->second;
++                krb_principal = pr_it->second;
++                hdfsBuilderConfSetStr(hdfs_builder, "hadoop.security.authentication", "kerberos");
++                hdfsBuilderConfSetStr(hdfs_builder, "hadoop.security.keytab.file", krb_keytab.data());
++                hdfsBuilderConfSetStr(hdfs_builder, "hadoop.security.krb5.principal", krb_principal.data());
++            }
++        }
++    }
++
++    // Save and restore KRB5CCNAME so each catalog can have its own Kerberos ticket
++    // cache. This is safe because create_hdfs_fs_handle runs under HdfsFsCache::_lock.
++    char* saved_krb5cc = nullptr;
++    std::string per_catalog_krb5cc;
++    if (use_kerberos) {
++        saved_krb5cc = getenv("KRB5CCNAME");
++        size_t hash_val = std::hash<std::string>{}(krb_keytab + ":" + krb_principal);
++        per_catalog_krb5cc = "/tmp/starrocks_krb5cc_" + std::to_string(hash_val);
++        setenv("KRB5CCNAME", ("FILE:" + per_catalog_krb5cc).c_str(), 1);
++    }
++
+     hdfs_client->hdfs_fs = hdfsBuilderConnect(hdfs_builder);
++
++    if (use_kerberos) {
++        if (saved_krb5cc != nullptr) {
++            setenv("KRB5CCNAME", saved_krb5cc, 1);
++        } else {
++            unsetenv("KRB5CCNAME");
++        }
++    }
++
+     if (hdfs_client->hdfs_fs == nullptr) {
+-        return Status::InternalError(strings::Substitute("fail to connect hdfs namenode, namenode=$0, err=$1", namenode,
+-                                                         get_hdfs_err_msg()));
++        std::string err_detail = namenode;
++        if (use_kerberos) {
++            err_detail += " krb5_principal=" + krb_principal;
++        }
++        return Status::InternalError(strings::Substitute("fail to connect hdfs namenode, namenode=$0, err=$1",
++                                                         err_detail, get_hdfs_err_msg()));
+     }
+     return Status::OK();
+ }
+ 
+ Status HdfsFsCache::get_connection(const std::string& namenode, std::shared_ptr<HdfsFsClient>& hdfs_client,
+                                    const FSOptions& options) {
+-    std::string cache_key = namenode;
++    std::string cache_key = options.catalog_id + ":" + namenode;
+     const THdfsProperties* properties = options.hdfs_properties();
+     if (properties != nullptr && properties->__isset.hdfs_username) {
+         cache_key += properties->hdfs_username;
+diff --git a/fe/fe-core/src/main/java/com/starrocks/connector/hive/HiveMetaClient.java b/fe/fe-core/src/main/java/com/starrocks/connector/hive/HiveMetaClient.java
+index d7ef9b5..97d3894 100644
+--- a/fe/fe-core/src/main/java/com/starrocks/connector/hive/HiveMetaClient.java
++++ b/fe/fe-core/src/main/java/com/starrocks/connector/hive/HiveMetaClient.java
+@@ -20,6 +20,8 @@ import com.starrocks.common.profile.Timer;
+ import com.starrocks.common.profile.Tracers;
+ import com.starrocks.connector.HdfsEnvironment;
+ import com.starrocks.connector.exception.StarRocksConnectorException;
++import com.starrocks.connector.hadoop.HadoopExt;
++import com.starrocks.connector.hadoop.GenericExceptionAction;
+ import com.starrocks.connector.hive.events.MetastoreNotificationFetchException;
+ import com.starrocks.connector.hive.glue.AWSCatalogMetastoreClient;
+ import org.apache.commons.lang.exception.ExceptionUtils;
+@@ -65,12 +67,22 @@ public class HiveMetaClient {
+     private final Object clientPoolLock = new Object();
+ 
+     private final HiveConf conf;
++    private final String krbPrincipal;
++    private final String krbKeytab;
++    private final String krb5ConfPath;
+ 
+     // Required for creating an instance of RetryingMetaStoreClient.
+     private static final HiveMetaHookLoader DUMMY_HOOK_LOADER = tbl -> null;
+ 
+     public HiveMetaClient(HiveConf conf) {
++        this(conf, null, null, null);
++    }
++
++    public HiveMetaClient(HiveConf conf, String krbPrincipal, String krbKeytab, String krb5ConfPath) {
+         this.conf = conf;
++        this.krbPrincipal = krbPrincipal;
++        this.krbKeytab = krbKeytab;
++        this.krb5ConfPath = krb5ConfPath;
+     }
+ 
+     public static HiveMetaClient createHiveMetaClient(HdfsEnvironment env, Map<String, String> properties) {
+@@ -82,7 +94,10 @@ public class HiveMetaClient {
+         }
+         String hmsTimeout = properties.getOrDefault(HIVE_METASTORE_TIMEOUT, String.valueOf(Config.hive_meta_store_timeout_s));
+         conf.set(MetastoreConf.ConfVars.CLIENT_SOCKET_TIMEOUT.getHiveName(), hmsTimeout);
+-        return new HiveMetaClient(conf);
++        return new HiveMetaClient(conf,
++                properties.get("hive.metastore.kerberos.principal"),
++                properties.get("hive.metastore.kerberos.keytab"),
++                properties.get("hive.metastore.kerberos.krb5.conf"));
+     }
+ 
+     public class RecyclableClient {
+@@ -136,10 +151,20 @@ public class HiveMetaClient {
+ 
+         synchronized (clientPoolLock) {
+             RecyclableClient client = clientPool.poll();
+-            // The pool was empty so create a new client and return that.
+-            // Serialize client creation to defend against possible race conditions accessing
+-            // local Kerberos state
+             if (client == null) {
++                if (krbPrincipal != null && krbKeytab != null) {
++                    try {
++                        return HadoopExt.getInstance().doAsWithSwap(krbPrincipal, krbKeytab, krb5ConfPath,
++                            new GenericExceptionAction<RecyclableClient, Exception>() {
++                                @Override
++                                public RecyclableClient run() throws Exception {
++                                    return new RecyclableClient(conf);
++                                }
++                            });
++                    } catch (Exception e) {
++                        throw new MetaException("Kerberos login failed: " + e.getMessage());
++                    }
++                }
+                 return new RecyclableClient(conf);
+             } else {
+                 return client;
+@@ -159,7 +184,14 @@ public class HiveMetaClient {
+             client = getClient();
+             argClasses = argClasses == null ? ClassUtils.getCompatibleParamClasses(args) : argClasses;
+             Method method = client.hiveClient.getClass().getDeclaredMethod(methodName, argClasses);
+-            return (T) method.invoke(client.hiveClient, args);
++            IMetaStoreClient hiveClient = client.hiveClient;
++            return HadoopExt.getInstance().doAsWithSwap(krbPrincipal, krbKeytab, krb5ConfPath,
++                new GenericExceptionAction<T, Exception>() {
++                    @Override
++                    public T run() throws Exception {
++                        return (T) method.invoke(hiveClient, args);
++                    }
++                });
+         } catch (Throwable e) {
+             LOG.error(messageIfError, e);
+             connectionException = new StarRocksConnectorException(messageIfError + ", msg: " +
+diff --git a/fe/fe-core/src/main/java/com/starrocks/credential/hdfs/HDFSCloudConfigurationProvider.java b/fe/fe-core/src/main/java/com/starrocks/credential/hdfs/HDFSCloudConfigurationProvider.java
+index 0812782..5b649cc 100644
+--- a/fe/fe-core/src/main/java/com/starrocks/credential/hdfs/HDFSCloudConfigurationProvider.java
++++ b/fe/fe-core/src/main/java/com/starrocks/credential/hdfs/HDFSCloudConfigurationProvider.java
+@@ -65,12 +65,23 @@ public class HDFSCloudConfigurationProvider implements CloudConfigurationProvide
+     public CloudConfiguration build(Map<String, String> properties) {
+         Map<String, String> prop = preprocessProperties(properties);
+ 
++        // Support standard Hadoop config keys (hadoop.security.krb5.principal,
++        // hadoop.security.keytab.file) as fallback for FE credential validation,
++        // so that users can use standard Hadoop config keys in catalog properties.
++        String krbPrincipal = getOrDefault(properties, HDFS_KERBEROS_PRINCIPAL, HDFS_KERBEROS_PRINCIPAL_DEPRECATED);
++        if (krbPrincipal.isEmpty()) {
++            krbPrincipal = properties.getOrDefault("hadoop.security.krb5.principal", "");
++        }
++        String krbKeytab = getOrDefault(properties, HADOOP_KERBEROS_KEYTAB, HDFS_KERBEROS_KEYTAB_DEPRECATED);
++        if (krbKeytab.isEmpty()) {
++            krbKeytab = properties.getOrDefault("hadoop.security.keytab.file", "");
++        }
+         HDFSCloudCredential hdfsCloudCredential = new HDFSCloudCredential(
+                 getOrDefault(properties, HDFS_AUTHENTICATION),
+                 getOrDefault(properties, HDFS_USERNAME, HDFS_USERNAME_DEPRECATED),
+                 getOrDefault(properties, HDFS_PASSWORD, HDFS_PASSWORD_DEPRECATED),
+-                getOrDefault(properties, HDFS_KERBEROS_PRINCIPAL, HDFS_KERBEROS_PRINCIPAL_DEPRECATED),
+-                getOrDefault(properties, HADOOP_KERBEROS_KEYTAB, HDFS_KERBEROS_KEYTAB_DEPRECATED),
++                krbPrincipal,
++                krbKeytab,
+                 getOrDefault(properties, HADOOP_KERBEROS_KEYTAB_CONTENT, HDFS_KERBEROS_KEYTAB_CONTENT_DEPRECATED),
+                 prop
+         );
+diff --git a/fe/fe-core/src/main/java/com/starrocks/credential/hdfs/HDFSCloudCredential.java b/fe/fe-core/src/main/java/com/starrocks/credential/hdfs/HDFSCloudCredential.java
+index b1463a2..cfd4af4 100644
+--- a/fe/fe-core/src/main/java/com/starrocks/credential/hdfs/HDFSCloudCredential.java
++++ b/fe/fe-core/src/main/java/com/starrocks/credential/hdfs/HDFSCloudCredential.java
+@@ -63,6 +63,17 @@ public class HDFSCloudCredential implements CloudCredential {
+ 
+     @Override
+     public void applyToConfiguration(Configuration configuration) {
++        if (hadoopConfiguration == null || hadoopConfiguration.isEmpty()) {
++            return;
++        }
++        for (Map.Entry<String, String> entry : hadoopConfiguration.entrySet()) {
++            String key = entry.getKey();
++            String value = entry.getValue();
++            if (key == null || value == null) {
++                continue;
++            }
++            configuration.set(key, value);
++        }
+     }
+ 
+     @Override
+@@ -82,6 +93,37 @@ public class HDFSCloudCredential implements CloudCredential {
+ 
+     @Override
+     public void toThrift(Map<String, String> properties) {
++        // Forward FE's Kerberos auth config to BE even though hadoop.security.authentication
++        // is removed from hadoopConfiguration by preprocessProperties().
++        if (KERBEROS_AUTH.equals(authentication)) {
++            properties.put("hadoop.security.authentication", "kerberos");
++            if (!krbKeyTabFile.isEmpty()) {
++                properties.put("hadoop.security.keytab.file", krbKeyTabFile);
++            }
++            if (!krbPrincipal.isEmpty()) {
++                properties.put("hadoop.security.krb5.principal", krbPrincipal);
++            }
++        }
++        if (hadoopConfiguration == null || hadoopConfiguration.isEmpty()) {
++            return;
++        }
++        // Forward HDFS HA/Kerberos configuration from catalog properties to BE.
++        // Properties like dfs.nameservices, dfs.ha.namenodes.*,
++        // dfs.namenode.rpc-address.*, dfs.client.failover.proxy.provider.*,
++        // hadoop.security.* need to be sent to the BE for proper connectivity.
++        for (Map.Entry<String, String> entry : hadoopConfiguration.entrySet()) {
++            String key = entry.getKey();
++            String value = entry.getValue();
++            if (key == null || value == null) {
++                continue;
++            }
++            // Only forward configuration keys relevant to HDFS connectivity
++            // (e.g., HA, Kerberos, proxy settings)
++            if (key.startsWith("dfs.") || key.startsWith("hadoop.") ||
++                    key.startsWith("ipc.") || key.startsWith("hive.")) {
++                properties.put(key, value);
++            }
++        }
+     }
+ 
+     @Override
+diff --git a/java-extensions/hadoop-ext/src/main/java/com/starrocks/connector/hadoop/HadoopExt.java b/java-extensions/hadoop-ext/src/main/java/com/starrocks/connector/hadoop/HadoopExt.java
+index 38ab3af..40fa7f1 100644
+--- a/java-extensions/hadoop-ext/src/main/java/com/starrocks/connector/hadoop/HadoopExt.java
++++ b/java-extensions/hadoop-ext/src/main/java/com/starrocks/connector/hadoop/HadoopExt.java
+@@ -1,17 +1,5 @@
+ // Copyright 2021-present StarRocks, Inc. All rights reserved.
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//     https://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
++// ...license header...
+ package com.starrocks.connector.hadoop;
+ 
+ import org.apache.hadoop.conf.Configuration;
+@@ -21,46 +9,83 @@ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+ 
+ import java.security.PrivilegedAction;
++import java.lang.reflect.Method;
++import java.io.IOException;
+ 
+ public class HadoopExt {
+-    private static final Logger LOGGER =
+-            LoggerFactory.getLogger(HadoopExt.class);
++    private static final Logger LOGGER = LoggerFactory.getLogger(HadoopExt.class);
+     private static final HadoopExt INSTANCE = new HadoopExt();
+     public static final String LOGGER_MESSAGE_PREFIX = "[hadoop-ext]";
+-
+     public static final String HADOOP_CONFIG_RESOURCES = "hadoop.config.resources";
+     public static final String HADOOP_RUNTIME_JARS = "hadoop.runtime.jars";
+     public static final String HADOOP_CLOUD_CONFIGURATION_STRING = "hadoop.cloud.configuration.string";
+     public static final String HADOOP_USERNAME = "hadoop.username";
+ 
+-    public static HadoopExt getInstance() {
+-        return INSTANCE;
+-    }
++    public static HadoopExt getInstance() { return INSTANCE; }
+ 
+-    public void rewriteConfiguration(Configuration conf) {
+-    }
++    public void rewriteConfiguration(Configuration conf) {}
++    public FileSystem bindUGIToFileSystem(FileSystem fs, UserGroupInformation ugi) { return fs; }
++    public String getCloudConfString(Configuration conf) { return conf.get(HADOOP_CLOUD_CONFIGURATION_STRING, ""); }
++    public UserGroupInformation getHMSUGI(Configuration conf) { return null; }
++    public UserGroupInformation getHDFSUGI(Configuration conf) { return null; }
+ 
+-    public FileSystem bindUGIToFileSystem(FileSystem fs, UserGroupInformation ugi) {
+-        return fs;
++    // Per-catalog Kerberos UGI switching with dynamic krb5.conf support
++    public <R, E extends Exception> R doAsWithSwap(String krbPrincipal, String krbKeytab,
++                                                      GenericExceptionAction<R, E> action) throws E {
++        return doAsWithSwap(krbPrincipal, krbKeytab, null, action);
+     }
+ 
+-    public String getCloudConfString(Configuration conf) {
+-        return conf.get(HADOOP_CLOUD_CONFIGURATION_STRING, "");
+-    }
+-
+-    public UserGroupInformation getHMSUGI(Configuration conf) {
+-        return null;
++    public <R, E extends Exception> R doAsWithSwap(String krbPrincipal, String krbKeytab,
++                                                      String krb5ConfPath,
++                                                      GenericExceptionAction<R, E> action) throws E {
++        if (krbPrincipal == null || krbKeytab == null) {
++            return action.run();
++        }
++        synchronized (UserGroupInformation.class) {
++            String origKrb5Conf = null;
++            try {
++                if (krb5ConfPath != null) {
++                    origKrb5Conf = System.getProperty("java.security.krb5.conf");
++                    System.setProperty("java.security.krb5.conf", krb5ConfPath);
++                    refreshKrb5Config();
++                }
++                if (!UserGroupInformation.isSecurityEnabled()) {
++                    Configuration ugiConf = new Configuration();
++                    ugiConf.set("hadoop.security.authentication", "kerberos");
++                    UserGroupInformation.setConfiguration(ugiConf);
++                }
++                if (!UserGroupInformation.isSecurityEnabled()) {
++                    Configuration ugiConf = new Configuration();
++                    ugiConf.set("hadoop.security.authentication", "kerberos");
++                    UserGroupInformation.setConfiguration(ugiConf);
++                }
++                UserGroupInformation.loginUserFromKeytab(krbPrincipal, krbKeytab);
++                UserGroupInformation ugi = UserGroupInformation.getLoginUser();
++                return executeActionInDoAs(ugi, action);
++            } catch (IOException e) {
++                throw new RuntimeException("Kerberos login failed for " + krbPrincipal, e);
++            } finally {
++                if (krb5ConfPath != null && origKrb5Conf != null) {
++                    System.setProperty("java.security.krb5.conf", origKrb5Conf);
++                    refreshKrb5Config();
++                }
++            }
++        }
+     }
+ 
+-    public UserGroupInformation getHDFSUGI(Configuration conf) {
+-        return null;
++    public <R, E extends Exception> R doAs(UserGroupInformation ugi, GenericExceptionAction<R, E> action) throws E {
++        if (ugi == null) { return action.run(); }
++        return executeActionInDoAs(ugi, action);
+     }
+ 
+-    public <R, E extends Exception> R doAs(UserGroupInformation ugi, GenericExceptionAction<R, E> action) throws E {
+-        if (ugi == null) {
+-            return action.run();
++    private static void refreshKrb5Config() {
++        try {
++            Class<?> configClass = Class.forName("sun.security.krb5.Config");
++            Method refreshMethod = configClass.getMethod("refresh");
++            refreshMethod.invoke(null);
++        } catch (Exception e) {
++            LOGGER.warn("Failed to refresh Krb5 config", e);
+         }
+-        return executeActionInDoAs(ugi, action);
+     }
+ 
+     static <R, E extends Exception> R executeActionInDoAs(UserGroupInformation userGroupInformation,
+@@ -77,25 +102,15 @@ public class HadoopExt {
+     private static class ResultOrException<T, E extends Exception> {
+         private final T result;
+         private final Throwable exception;
+-
+-        public ResultOrException(T result, Throwable exception) {
+-            this.result = result;
+-            this.exception = exception;
+-        }
+-
++        public ResultOrException(T result, Throwable exception) { this.result = result; this.exception = exception; }
+         @SuppressWarnings("unchecked")
+-        public T get()
+-                throws E {
++        public T get() throws E {
+             if (exception != null) {
+-                if (exception instanceof Error) {
+-                    throw (Error) exception;
+-                }
+-                if (exception instanceof RuntimeException) {
+-                    throw (RuntimeException) exception;
+-                }
++                if (exception instanceof Error) throw (Error) exception;
++                if (exception instanceof RuntimeException) throw (RuntimeException) exception;
+                 throw (E) exception;
+             }
+             return result;
+         }
+     }
+-}
+\ No newline at end of file
++}

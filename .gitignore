@@ -1,0 +1,15 @@
+# Build outputs - binary and jar files
+*.jar
+*.debuginfo
+starrocks_be
+
+# Secrets - NEVER commit (keytab + base64-encoded keytab)
+*.keytab
+*.b64
+
+# Local-only / scratch / tooling dirs (not part of the deliverable)
+scripts/legacy/
+tmp/
+.archive/
+.workbuddy/
+.claude/

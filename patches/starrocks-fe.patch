@@ -1,0 +1,178 @@
+diff --git a/fe/fe-core/src/main/java/com/starrocks/connector/hive/HiveMetaClient.java b/fe/fe-core/src/main/java/com/starrocks/connector/hive/HiveMetaClient.java
+index d7ef9b5..97d3894 100644
+--- a/fe/fe-core/src/main/java/com/starrocks/connector/hive/HiveMetaClient.java
++++ b/fe/fe-core/src/main/java/com/starrocks/connector/hive/HiveMetaClient.java
+@@ -20,6 +20,8 @@ import com.starrocks.common.profile.Timer;
+ import com.starrocks.common.profile.Tracers;
+ import com.starrocks.connector.HdfsEnvironment;
+ import com.starrocks.connector.exception.StarRocksConnectorException;
++import com.starrocks.connector.hadoop.HadoopExt;
++import com.starrocks.connector.hadoop.GenericExceptionAction;
+ import com.starrocks.connector.hive.events.MetastoreNotificationFetchException;
+ import com.starrocks.connector.hive.glue.AWSCatalogMetastoreClient;
+ import org.apache.commons.lang.exception.ExceptionUtils;
+@@ -65,12 +67,22 @@ public class HiveMetaClient {
+     private final Object clientPoolLock = new Object();
+
+     private final HiveConf conf;
++    private final String krbPrincipal;
++    private final String krbKeytab;
++    private final String krb5ConfPath;
+
+     // Required for creating an instance of RetryingMetaStoreClient.
+     private static final HiveMetaHookLoader DUMMY_HOOK_LOADER = tbl -> null;
+
+     public HiveMetaClient(HiveConf conf) {
++        this(conf, null, null, null);
++    }
++
++    public HiveMetaClient(HiveConf conf, String krbPrincipal, String krbKeytab, String krb5ConfPath) {
+         this.conf = conf;
++        this.krbPrincipal = krbPrincipal;
++        this.krbKeytab = krbKeytab;
++        this.krb5ConfPath = krb5ConfPath;
+     }
+
+     public static HiveMetaClient createHiveMetaClient(HdfsEnvironment env, Map<String, String> properties) {
+@@ -82,7 +94,10 @@ public class HiveMetaClient {
+         }
+         String hmsTimeout = properties.getOrDefault(HIVE_METASTORE_TIMEOUT, String.valueOf(Config.hive_meta_store_timeout_s));
+         conf.set(MetastoreConf.ConfVars.CLIENT_SOCKET_TIMEOUT.getHiveName(), hmsTimeout);
+-        return new HiveMetaClient(conf);
++        return new HiveMetaClient(conf,
++                properties.get("hive.metastore.kerberos.principal"),
++                properties.get("hive.metastore.kerberos.keytab"),
++                properties.get("hive.metastore.kerberos.krb5.conf"));
+     }
+
+     public class RecyclableClient {
+@@ -136,10 +151,20 @@ public class HiveMetaClient {
+
+         synchronized (clientPoolLock) {
+             RecyclableClient client = clientPool.poll();
+-            // The pool was empty so create a new client and return that.
+-            // Serialize client creation to defend against possible race conditions accessing
+-            // local Kerberos state
+             if (client == null) {
++                if (krbPrincipal != null && krbKeytab != null) {
++                    try {
++                        return HadoopExt.getInstance().doAsWithSwap(krbPrincipal, krbKeytab, krb5ConfPath,
++                            new GenericExceptionAction<RecyclableClient, Exception>() {
++                                @Override
++                                public RecyclableClient run() throws Exception {
++                                    return new RecyclableClient(conf);
++                                }
++                            });
++                    } catch (Exception e) {
++                        throw new MetaException("Kerberos login failed: " + e.getMessage());
++                    }
++                }
+                 return new RecyclableClient(conf);
+             } else {
+                 return client;
+@@ -159,7 +184,14 @@ public class HiveMetaClient {
+             client = getClient();
+             argClasses = argClasses == null ? ClassUtils.getCompatibleParamClasses(args) : argClasses;
+             Method method = client.hiveClient.getClass().getDeclaredMethod(methodName, argClasses);
+-            return (T) method.invoke(client.hiveClient, args);
++            IMetaStoreClient hiveClient = client.hiveClient;
++            return HadoopExt.getInstance().doAsWithSwap(krbPrincipal, krbKeytab, krb5ConfPath,
++                new GenericExceptionAction<T, Exception>() {
++                    @Override
++                    public T run() throws Exception {
++                        return (T) method.invoke(hiveClient, args);
++                    }
++                });
+         } catch (Throwable e) {
+             LOG.error(messageIfError, e);
+             connectionException = new StarRocksConnectorException(messageIfError + ", msg: " +
+diff --git a/fe/fe-core/src/main/java/com/starrocks/credential/hdfs/HDFSCloudConfigurationProvider.java b/fe/fe-core/src/main/java/com/starrocks/credential/hdfs/HDFSCloudConfigurationProvider.java
+index 0812782..5b649cc 100644
+--- a/fe/fe-core/src/main/java/com/starrocks/credential/hdfs/HDFSCloudConfigurationProvider.java
++++ b/fe/fe-core/src/main/java/com/starrocks/credential/hdfs/HDFSCloudConfigurationProvider.java
+@@ -65,12 +65,23 @@ public class HDFSCloudConfigurationProvider implements CloudConfigurationProvide
+     public CloudConfiguration build(Map<String, String> properties) {
+         Map<String, String> prop = preprocessProperties(properties);
+
++        // Support standard Hadoop config keys (hadoop.security.krb5.principal,
++        // hadoop.security.keytab.file) as fallback for FE credential validation,
++        // so that users can use standard Hadoop config keys in catalog properties.
++        String krbPrincipal = getOrDefault(properties, HDFS_KERBEROS_PRINCIPAL, HDFS_KERBEROS_PRINCIPAL_DEPRECATED);
++        if (krbPrincipal.isEmpty()) {
++            krbPrincipal = properties.getOrDefault("hadoop.security.krb5.principal", "");
++        }
++        String krbKeytab = getOrDefault(properties, HADOOP_KERBEROS_KEYTAB, HDFS_KERBEROS_KEYTAB_DEPRECATED);
++        if (krbKeytab.isEmpty()) {
++            krbKeytab = properties.getOrDefault("hadoop.security.keytab.file", "");
++        }
+         HDFSCloudCredential hdfsCloudCredential = new HDFSCloudCredential(
+                 getOrDefault(properties, HDFS_AUTHENTICATION),
+                 getOrDefault(properties, HDFS_USERNAME, HDFS_USERNAME_DEPRECATED),
+                 getOrDefault(properties, HDFS_PASSWORD, HDFS_PASSWORD_DEPRECATED),
+-                getOrDefault(properties, HDFS_KERBEROS_PRINCIPAL, HDFS_KERBEROS_PRINCIPAL_DEPRECATED),
+-                getOrDefault(properties, HADOOP_KERBEROS_KEYTAB, HDFS_KERBEROS_KEYTAB_DEPRECATED),
++                krbPrincipal,
++                krbKeytab,
+                 getOrDefault(properties, HADOOP_KERBEROS_KEYTAB_CONTENT, HDFS_KERBEROS_KEYTAB_CONTENT_DEPRECATED),
+                 prop
+         );
+diff --git a/fe/fe-core/src/main/java/com/starrocks/credential/hdfs/HDFSCloudCredential.java b/fe/fe-core/src/main/java/com/starrocks/credential/hdfs/HDFSCloudCredential.java
+index b1463a2..cfd4af4 100644
+--- a/fe/fe-core/src/main/java/com/starrocks/credential/hdfs/HDFSCloudCredential.java
++++ b/fe/fe-core/src/main/java/com/starrocks/credential/hdfs/HDFSCloudCredential.java
+@@ -63,6 +63,17 @@ public class HDFSCloudCredential implements CloudCredential {
+
+     @Override
+     public void applyToConfiguration(Configuration configuration) {
++        if (hadoopConfiguration == null || hadoopConfiguration.isEmpty()) {
++            return;
++        }
++        for (Map.Entry<String, String> entry : hadoopConfiguration.entrySet()) {
++            String key = entry.getKey();
++            String value = entry.getValue();
++            if (key == null || value == null) {
++                continue;
++            }
++            configuration.set(key, value);
++        }
+     }
+
+     @Override
+@@ -82,6 +93,37 @@ public class HDFSCloudCredential implements CloudCredential {
+
+     @Override
+     public void toThrift(Map<String, String> properties) {
++        // Forward FE's Kerberos auth config to BE even though hadoop.security.authentication
++        // is removed from hadoopConfiguration by preprocessProperties().
++        if (KERBEROS_AUTH.equals(authentication)) {
++            properties.put("hadoop.security.authentication", "kerberos");
++            if (!krbKeyTabFile.isEmpty()) {
++                properties.put("hadoop.security.keytab.file", krbKeyTabFile);
++            }
++            if (!krbPrincipal.isEmpty()) {
++                properties.put("hadoop.security.krb5.principal", krbPrincipal);
++            }
++        }
++        if (hadoopConfiguration == null || hadoopConfiguration.isEmpty()) {
++            return;
++        }
++        // Forward HDFS HA/Kerberos configuration from catalog properties to BE.
++        // Properties like dfs.nameservices, dfs.ha.namenodes.*,
++        // dfs.namenode.rpc-address.*, dfs.client.failover.proxy.provider.*,
++        // hadoop.security.* need to be sent to the BE for proper connectivity.
++        for (Map.Entry<String, String> entry : hadoopConfiguration.entrySet()) {
++            String key = entry.getKey();
++            String value = entry.getValue();
++            if (key == null || value == null) {
++                continue;
++            }
++            // Only forward configuration keys relevant to HDFS connectivity
++            // (e.g., HA, Kerberos, proxy settings)
++            if (key.startsWith("dfs.") || key.startsWith("hadoop.") ||
++                    key.startsWith("ipc.") || key.startsWith("hive.")) {
++                properties.put(key, value);
++            }
++        }
+     }
+
+     @Override

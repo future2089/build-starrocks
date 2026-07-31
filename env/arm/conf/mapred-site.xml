@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<!--
+  Deployed to: hive_arm container (192.168.0.181) : /opt/hadoop/etc/hadoop/mapred-site.xml
+  Date: 2026-07-30
+
+  No YARN ResourceManager runs in this container, so MapReduce jobs (e.g. Hive
+  count(*)) must execute in-process via the LocalJobRunner.
+-->
+<configuration>
+  <property>
+    <name>mapreduce.framework.name</name>
+    <value>local</value>
+  </property>
+</configuration>

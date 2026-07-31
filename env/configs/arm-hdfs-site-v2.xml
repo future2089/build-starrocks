@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+<property><name>dfs.replication</name><value>1</value></property>
+<property><name>dfs.namenode.name.dir</name><value>/tmp/hadoop/name</value></property>
+<property><name>dfs.datanode.data.dir</name><value>/tmp/hadoop/data</value></property>
+<property><name>dfs.namenode.http.address</name><value>0.0.0.0:50070</value></property>
+<property><name>dfs.datanode.hostname</name><value>192.168.0.181</value></property>
+<property><name>dfs.permissions</name><value>false</value></property>
+<property><name>dfs.nameservices</name><value>arm-ha</value></property>
+<property><name>dfs.ha.namenodes.arm-ha</name><value>nn1</value></property>
+<property><name>dfs.namenode.rpc-address.arm-ha.nn1</name><value>192.168.0.181:8020</value></property>
+<property><name>dfs.namenode.http-address.arm-ha.nn1</name><value>192.168.0.181:50070</value></property>
+<property><name>dfs.client.failover.proxy.provider.arm-ha</name><value>org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider</value></property>
+<property><name>dfs.namenode.keytab.file</name><value>/etc/hdfs.keytab</value></property>
+<property><name>dfs.namenode.kerberos.principal</name><value>hdfs/arm-ha@ARM.SR.TEST</value></property>
+<property><name>dfs.datanode.keytab.file</name><value>/etc/hdfs.keytab</value></property>
+<property><name>dfs.datanode.kerberos.principal</name><value>hdfs/arm-ha@ARM.SR.TEST</value></property>
+<property><name>dfs.data.transfer.protection</name><value>authentication</value></property>
+<property><name>dfs.block.access.token.enable</name><value>true</value></property>
+<property><name>dfs.datanode.address</name><value>0.0.0.0:9866</value></property>
+<property><name>dfs.datanode.http.address</name><value>0.0.0.0:9864</value></property>
+<property><name>dfs.datanode.https.address</name><value>0.0.0.0:9865</value></property>
+<property><name>dfs.datanode.data.transfer.sasl.use.embedded.httpserver</name><value>true</value></property>
+</configuration>
